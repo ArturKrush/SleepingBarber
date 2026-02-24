@@ -1,131 +1,101 @@
-﻿namespace SleepingBarber
+﻿using System;
+using System.Threading;
+
+namespace SleepingBarber
 {
     public class Program
     {
         static Random rand = new Random();
-        const int maxCustomers = 4;
         const int numberOfChairs = 3;
-        static Semaphore customers = new Semaphore(numberOfChairs, numberOfChairs);
-        static object barber = new();
-        static Mutex mutex = new Mutex();
-        static int waiting = 0;
+        const int maxCustomers = 6;
+        static int waiting = 0; // кількість клієнтів, що чекають
 
-        //static bool isSomebodyWaiting = false;
+        // Локер, який захищає змінну waiting
+        static object queueLocker = new();
+
+        // Семафор для сигналізації перукареві: 0 спочатку (немає клієнтів)
+        static Semaphore customersWaiting = new Semaphore(0, numberOfChairs);
+
+        // Семафор для сигналізації клієнту: 0 спочатку (перукар спить/зайнятий)
+        static Semaphore barberReady = new Semaphore(0, 1);
 
         public static void Barber()
         {
             while (true)
             {
-                //While nobody is in the barbershop, barber will sleep (checks for the first time)
-                //if (!isSomebodyWaiting)
-                    CheckForCustomers();
+                // Повідомлення, що барбер спить, виводиться лише тоді, коли нікого немає в черзі
+                lock (queueLocker)
+                {
+                    if (waiting == 0)
+                        Console.WriteLine("Barber is sleeping/waiting for customers...");
+                }
 
-                //StartCuttingCustomer();
+                // Перукар чекає, поки з'явиться хоча б 1 клієнт. Якщо 0 - спить (потік блокується).
+                customersWaiting.WaitOne();
 
-                Thread.Sleep(20000);
-                return; //For exit from endless loop
+                /* Клієнт розбудив перукаря. Клієнт приходить з черги.
+                   Виключно потік барбера може змінювати/читати змінну waiting у цей момент часу */
+                lock (queueLocker)
+                {
+                    waiting--;
+                }
+
+                // Перший з клієнтів отримує сигнал, що барбер його чекає
+                barberReady.Release();
+
+                // Перукар (тепер саме цей потік) стриже
+                //Console.WriteLine("Barber is cutting hair...");
+                Thread.Sleep(rand.Next(1, 3) * 1000); // Затримка рандомної довжини
+                Console.WriteLine("Barber finished cutting.");
             }
         }
 
-        public static void CheckForCustomers()
+        public static void Customer(object id)
         {
-            mutex.WaitOne();
-            if (waiting == 0)
+            string name = $"Customer {id}";
+            Console.WriteLine($"{name} comes to the barbershop.");
+
+            /* Тільки один потік може працювати з виділеним за допомогою lock кодом
+               в певний момент часу завдяки блокуванню queueLocker */
+            lock (queueLocker)
             {
-                mutex.ReleaseMutex();
-                BarberGoToSleep();
-            }
-            //else
-            //    isSomebodyWaiting = true;
-        }
+                // Якщо є вільні місця, то клієнт займає місце у черзі
+                if (waiting < numberOfChairs)
+                {
+                    waiting++; // Займає місце в черзі
+                    Console.WriteLine($"{name} took a waiting chair. Waiting: {waiting}");
 
-        public static void BarberGoToSleep()
-        {
-            Console.WriteLine("No customer is waiting. Barber is sleeping.");
-            //Thread.Sleep(2000);
-        }
-
-        public static void StartCuttingCustomer()
-        {
-            lock (barber)
-            {
-                mutex.WaitOne();
-                --waiting;
-                //if(waiting == 0)
-                //    Console.WriteLine("{0} the first for today or the first for now.", Thread.CurrentThread.Name);
-                mutex.ReleaseMutex();
-
-                customers.Release();
-
-                Console.WriteLine("Barber is cutting {0}.", Thread.CurrentThread.Name);
-                Thread.Sleep(rand.Next(1, 4) * 1000);
-                Console.WriteLine("Barber has finished cutting {0}.", Thread.CurrentThread.Name);
-            }
-        }
-
-        public static void Customer()
-        {
-            Console.WriteLine("{0} comes to the shop.", Thread.CurrentThread.Name);
-            mutex.WaitOne();
-            Thread.Sleep(1000);
-
-            if (waiting == 0)
-            {
-                Console.WriteLine("Nobody was waiting. {0} is first. {0} will check if somebody is in the barber room.",
-                    Thread.CurrentThread.Name);
-            }
-            else if (waiting == numberOfChairs)
-            {
-                Console.WriteLine("No free seats left. {0} is leaving.", Thread.CurrentThread.Name);
-                mutex.ReleaseMutex();
-                return;
+                    // Сигналізує потоку перукаря, що він очікує (як мінімум 1 клієнт вже є)
+                    customersWaiting.Release();
+                }
+                else
+                {
+                    Console.WriteLine($"No free seats left. {name} is leaving.");
+                    return; // Місць немає, клієнт уходить (потік завершується)
+                }
             }
 
-            ++waiting;
-            mutex.ReleaseMutex();
+            // Клієнт чекає, поки перукар покличе його в робоче крісло
+            barberReady.WaitOne();
 
-            customers.WaitOne(); //In queue, maximum 3 customers will left
-            StartCuttingCustomer();
+            // Тут клієнта стрижуть
+            Console.WriteLine($"{name} is getting a haircut.");
         }
 
         static void Main(string[] args)
         {
-            //Creating 1 thread for barber and starting Barber method in it
             Thread barberThread = new Thread(Barber);
+            barberThread.IsBackground = true; // Щоб програма могла завершитися при нескінченному циклі перукаря
             barberThread.Start();
 
-            //Creating maxCustomers threads for customers and starting Customer method in them
-            Thread[] customers = new Thread[maxCustomers];
-            Thread customerThread;
-            for (int i = 0; i < maxCustomers; i++)
+            for (int i = 1; i <= maxCustomers; i++)
             {
-                customerThread = new Thread(Customer);
-                customerThread.Name = $"Customer {i}";
-                customers[i] = customerThread;
-                customers[i].Start();
-            }
-            for (int i = 0; i < maxCustomers; i++)
-            {
-                customers[i].Join();
+                Thread customerThread = new Thread(Customer);
+                customerThread.Start(i);
+                Thread.Sleep(500); // Клієнти приходять з невеликим інтервалом
             }
 
-            //2 new customers are comming after a break
-            Thread.Sleep(2000);
-            Thread[] customers2 = new Thread[2];
-            for (int i = 0; i < 2; i++)
-            {
-                customerThread = new Thread(Customer);
-                customerThread.Name = $"Customer {maxCustomers + (i + 1)}";
-                customers2[i] = customerThread;
-                customers2[i].Start();
-            }
-            for (int i = 0; i < 2; i++)
-            {
-                customers2[i].Join();
-            }
-
-            barberThread.Join();
-            Console.WriteLine("Job ends for today!");
+            Console.ReadLine(); // Очікування натискання Enter для завершення
         }
     }
 }
